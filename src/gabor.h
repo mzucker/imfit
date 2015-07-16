@@ -110,14 +110,23 @@ inline void gencoords(const cv::Size& sz,
 }
 
 inline double weighted_error(const DMat& target,
-                      const DMat& output, 
-                      const DMat& wmat,
-                      DMat& err) {
+                             const DMat& output, 
+                             const DMat& wmat,
+                             DMat& err,
+                             double display_pow=0.0) {
 
   err = target - output;
   if (!wmat.empty()) { err = err.mul(wmat); }
   err = err.mul(err);
-  return 0.5*cv::sum(err)[0];
+  double rval = 0.5*cv::sum(err)[0];
+  if (display_pow > 0) {
+    for (int i=0; i<err.rows; ++i) {
+      for (int j=0; j<err.cols; ++j) {
+        err(i,j) = pow(err(i,j), display_pow);
+      }
+    }
+  }
+  return rval;
 
 }
 
