@@ -13,30 +13,61 @@
 #include <highgui.h>
 #include <cv.h>
 #include "Timer.h"
+#include <time.h>
+#include <sys/stat.h>
 
 #define ERR_DISPLAY_POW 0.25
 
 struct ImFitOptions {
 
-  std::string image_file;
-  std::string weight_file;
+  std::string image_file;  // positional
 
-  int num_models;
-  int num_fits;
-  int max_iter;
-  int refine_iter;
-  int max_size;
-  int preview_size;
-  bool gui;
+  std::string weight_file; // w
+  std::string input_file;  // i 
+  std::string output_file; // o
+
+  std::string action;      // a
+
+  int num_models;          // n
+  int greedy_num_fits;     // f
+  int greedy_init_iter;    // m
+  int greedy_refine_iter;  // r
+  int greedy_replace_iter; // R
+  int max_size;            // s
+  int preview_size;        // p
+  int full_iter;           // F
+  double full_alpha;       // A
+  bool gui;                // g
 
   ImFitOptions() {
+
+    char buf[1024];
+
+    struct tm thetime;
+    
+    time_t clock = time(NULL);
+    localtime_r(&clock, &thetime);
+    strftime(buf, 1024, "params_%Y%j%H%M%S.txt", &thetime);
+
+    output_file = buf;
+    std::cout << "output_file = " << output_file << "\n";
+
     num_models = 150;
-    num_fits = 100;
-    max_iter = 10;
-    refine_iter = 100;
+
+    action = "greedyfit";
+    greedy_num_fits = 100;
+    greedy_init_iter = 10;
+    greedy_refine_iter = 100;
+    greedy_replace_iter = 100000;
+
     max_size = 0;
     preview_size = 512;
+
+    full_iter = 100;
+    full_alpha = 4e-5;
+
     gui = true;
+
   }
 
 };
@@ -56,6 +87,12 @@ void usage(std::ostream& ostr=std::cerr, int code=1) {
     "  -w, --weights=IMGFILE    Load error weights from image\n"
     "  -p, --preview-size=N     Set size of preview\n"
     "  -g, --no-gui             Suppress graphical output\n"
+    "  -i, --input=FILE         Read input params from FILE\n"
+    "  -o, --output=FILE        Write output params to FILE\n"
+    "  -F, --full-iter=NUM      Maximum # of iterations for full refinement\n"
+    "  -A, --full-alpha=NUM     Step size for full refinement\n"
+    "  -R, --replace-iter=NUM   Maximum # of iterations for replacement\n"
+    "  -a, --action=STR         Action to perform (greedyfit,replace)\n"        
     "  -h, --help               See this message\n";
 
   exit(code);
@@ -108,12 +145,18 @@ void parse_cmdline(int argc, char** argv, ImFitOptions& opts) {
     { "max-size",            required_argument, 0, 's' },
     { "weights",             required_argument, 0, 'w' },
     { "preview-size",        required_argument, 0, 'p' },
+    { "input",               required_argument, 0, 'i' },
+    { "output",              required_argument, 0, 'o' },
+    { "full-iter",           required_argument, 0, 'f' },
+    { "replace-iter",        required_argument, 0, 'R' },
+    { "full-alpha",          required_argument, 0, 'A' },
+    { "action",              required_argument, 0, 'a' },
     { "no-gui",              no_argument,       0, 'g' },
     { "help",                no_argument,       0, 'h' },
     { 0,                     0,                 0,  0  },
   };
 
-  const char* short_options = "n:f:m:r:s:w:p:gh";
+  const char* short_options = "n:f:m:r:s:w:p:i:o:a:F:A:R:gh";
 
   int opt, option_index;
 
@@ -122,12 +165,18 @@ void parse_cmdline(int argc, char** argv, ImFitOptions& opts) {
 
     switch (opt) {
     case 'n': opts.num_models = getlong(optarg); break;
-    case 'f': opts.num_fits = getlong(optarg); break;
-    case 'm': opts.max_iter = getlong(optarg); break;
-    case 'r': opts.refine_iter = getlong(optarg); break;
+    case 'f': opts.greedy_num_fits = getlong(optarg); break;
+    case 'm': opts.greedy_init_iter = getlong(optarg); break;
+    case 'r': opts.greedy_refine_iter = getlong(optarg); break;
     case 's': opts.max_size = getlong(optarg); break;
     case 'w': opts.weight_file = getinputfile(optarg); break;
     case 'p': opts.preview_size = getlong(optarg); break;
+    case 'i': opts.input_file = optarg; break;
+    case 'o': opts.output_file = optarg; break;
+    case 'a': opts.action = optarg; break;
+    case 'F': opts.full_iter = getlong(optarg); break;
+    case 'A': opts.full_alpha = getdouble(optarg); break;
+    case 'R': opts.greedy_replace_iter = getlong(optarg); break;
     case 'g': opts.gui = false; break;
     case 'h': usage(std::cout, 0); break;
     default: usage(); break;
@@ -146,8 +195,20 @@ void parse_cmdline(int argc, char** argv, ImFitOptions& opts) {
 class FitData {
 public:
 
+  double cost;
   std::vector<DMat> outputs;
   std::vector<DMat> params;
+
+  FitData(): cost(DBL_MAX) {}
+
+  FitData(const FitData& f) {
+    cost = f.cost;
+    for (size_t i=0; i<f.outputs.size(); ++i) {
+      outputs.push_back(f.outputs[i].clone());
+      params.push_back(f.params[i].clone());
+    }
+  }
+    
   
 };
 
@@ -236,96 +297,365 @@ public:
 
   }
 
+  void load_params(FitData& f) const {
 
-  void multifit(FitData& f) const {
+    std::vector<DMat> ptmp;
 
-    cv::RNG rng(mach_absolute_time());
-    DMat work(LM_DER_WORKSZ(GABOR_NUM_PARAMS, n), 1);
+    std::cout << "at " << __FILE__ << ":" << __LINE__ << "\n";
 
+    std::ifstream istr(opts.input_file.c_str());
+    if (!istr.is_open()) {
+      std::cerr << "can't read " << opts.input_file << "!\n";
+      exit(1);
+    }
+
+    std::cout << "at " << __FILE__ << ":" << __LINE__ << "\n";
+
+    size_t psz;
+    if (!(istr >> psz)) { 
+      std::cerr << "error getting # params\n";
+      exit(1);
+    }
+
+    std::cout << "at " << __FILE__ << ":" << __LINE__ << "\n";
+
+    for (size_t i=0; i<psz; ++i) {
+      DMat pi(GABOR_NUM_PARAMS, 1);
+      for (int j=0; j<GABOR_NUM_PARAMS; ++j) {
+        if (!(istr >> pi(j))) {
+          std::cerr << "error reading!\n";
+          exit(1);
+        }
+      }
+      ptmp.push_back(pi);
+    }
+
+    std::cout << "at " << __FILE__ << ":" << __LINE__ << "\n";
+
+    f.cost = DBL_MAX;
+    f.params.swap(ptmp);
+    f.outputs.resize(f.params.size());
+
+    std::cout << "at " << __FILE__ << ":" << __LINE__ << "\n";
+    
     DMat output(size, 0.0);
-    DMat preview(big_size, 0.0);
-    DMat error;
 
-    for (size_t i=0; i<f.outputs.size(); ++i) {
+    for (size_t i=0; i<f.params.size(); ++i) {
 
+      f.outputs[i] = DMat(size);
+      
+      gabor(f.params[i][0], n,
+            xc[0], yc[0], (const double*)NULL, (const double*)NULL,
+            f.outputs[i][0], (double*)NULL);
+      
       output += f.outputs[i];
-
-      DMat ptmp(big_size);
-
-      gabor(f.params[i][0], big_n, big_xc[0], big_yc[0], W, 
-            (const double*)NULL, ptmp[0], (double*)NULL);
-
-      preview += ptmp;
 
     }
 
-    double prev_cost = weighted_error(target, output, wmat, error, ERR_DISPLAY_POW);
+    DMat error;
 
-    std::cout << "initial error: " << prev_cost << "\n";
+    f.cost = weighted_error(target, output, wmat, error);
+    
 
-    size_t num_models = opts.num_models - f.outputs.size();
+  }
 
-    for (size_t model=0; model<num_models; ++model) {
+  void save_params(const FitData& f) const {
 
+    std::ofstream ostr(opts.output_file.c_str());
+    if (!ostr.is_open()) {
+      std::cerr << "can't write " << opts.output_file << "!\n";
+      exit(1);
+    }
+    ostr << f.params.size() << "\n";
+    for (size_t i=0; i<f.params.size(); ++i) {
+      assert(f.params[i].size() == cv::Size(1, GABOR_NUM_PARAMS));
+      for (int j=0; j<GABOR_NUM_PARAMS; ++j) {
+        ostr << f.params[i](j) << " ";
+      }
+      ostr << "\n";
+    }
+    
+    struct stat sb;
+
+    int result = lstat("params_latest.txt", &sb);
+    bool do_symlink = false;
+
+    if (result == 0 && S_ISLNK(sb.st_mode)) {
+      do_symlink = (unlink("params_latest.txt") == 0);      
+    } else if (result < 0 && errno == ENOENT) {
+      do_symlink = true;
+    }
+
+    if (do_symlink) {
+      symlink(opts.output_file.c_str(), "params_latest.txt");
+    }
+
+  }
+
+  void full_refine(FitData& f, DMat output, DMat& preview) const {
+
+    const double stepsize = opts.full_alpha / f.params.size();
+
+
+    for (int iter=0; iter<=opts.full_iter; ++iter) {
+
+      output = DMat(size, 0.0);
+      preview = DMat(big_size, 0.0);
+
+      // get outputs
+      for (size_t i=0; i<f.outputs.size(); ++i) {
+
+        DMat cur_output(size);
+        DMat ptmp(big_size);
+        
+        gabor(f.params[i][0], n,
+              xc[0], yc[0], (const double*)NULL, (const double*)NULL,
+              f.outputs[i][0], (double*)NULL);
+
+        output += f.outputs[i];
+
+        if (opts.gui) {
+
+          DMat ptmp(big_size);
+          
+          gabor(f.params[i][0], big_n, big_xc[0], big_yc[0],
+                (const double*) NULL, (const double*)NULL, 
+                ptmp[0], (double*)NULL);
+
+          preview += ptmp;
+
+        }
+
+      }
+
+      DMat error;
+
+      // get cost/error vector
+      f.cost = weighted_error(target, output, wmat, error);
+
+      std::cout << "cost at full iter " << (iter+1) << " is " << f.cost << "\n";
+
+
+      if (opts.gui) {
+
+        display(output, preview);
+
+      }
+
+      if (iter == opts.full_iter) {
+        break;
+      }
+
+      DMat jac(n, GABOR_NUM_PARAMS);
+
+      // take gradient step
+      for (size_t i=0; i<f.outputs.size(); ++i) {
+
+        gabor(f.params[i][0], n,
+              xc[0], yc[0], W, (const double*)NULL,
+              (double*)NULL, jac[0]);
+
+        f.params[i] -= stepsize * (jac.t() * error.reshape(0, n));
+
+      }
+
+    }
+
+  }
+  
+  double greedy_single(const DMat& rel_target, DMat& best_params) const {
+
+    GaborData gdata(n, xc[0], yc[0], W, rel_target[0]);
+    
+    double best_cost = -1;
+    double info[LM_INFO_SZ];
+    
+    DMat work(LM_BLEIC_DER_WORKSZ(GABOR_NUM_PARAMS, n, 0, GABOR_NUM_INEQ), 1);
+
+    for (int fit=0; fit<opts.greedy_num_fits; ++fit) {
+      
+      DMat fit_params(GABOR_NUM_PARAMS, 1);
+
+      if (fit == 0 && !best_params.empty()) {
+        best_params.copyTo(fit_params);
+      } else {
+        gabor_random_params(fit_params[0], px_size, cv::theRNG());
+      }
+
+      double final_cost;
+
+      if (opts.greedy_init_iter > 0) {
+        final_cost = gdata.fit(fit_params[0], opts.greedy_init_iter, 
+                               info, work[0], px_size);
+      } else {
+        final_cost = gdata(fit_params[0]);
+      }
+
+      if (best_cost < 0 || final_cost < best_cost) {
+        fit_params.copyTo(best_params);
+        best_cost = final_cost;
+      }
+
+      std::cout << '.';
+      std::cout.flush();
+
+    }
+
+    std::cout << "\n";
+
+    if (opts.greedy_refine_iter > 0) {
+      best_cost = gdata.fit(best_params[0], opts.greedy_refine_iter, 
+                            info, work[0], px_size);
+    }
+
+    return best_cost;
+
+  }
+
+  void greedy_replace(FitData& f, DMat& output, DMat& preview) const {
+
+
+    for (int iter=0; iter<opts.greedy_replace_iter; ++iter) {
+
+      DMat error;
+
+      size_t replace = cv::theRNG().uniform(0, f.outputs.size());
+
+      output = DMat(size, 0.0);
+      preview = DMat(big_size, 0.0);
+
+      for (size_t i=0; i<f.outputs.size(); ++i) {
+
+        if (i != replace) {
+
+          output += f.outputs[i];
+
+          if (opts.gui) {
+
+            DMat ptmp(big_size);
+        
+            gabor(f.params[i][0], big_n, big_xc[0], big_yc[0], 
+                  (const double*)NULL, (const double*)NULL, 
+                  ptmp[0], (double*)NULL);
+        
+            preview += ptmp;
+
+          }
+
+        }
+
+      }
+
+      DMat best_params = f.params[replace].clone();
       DMat rel_target = target - output;
-      GaborData gdata(n, xc[0], yc[0], W, rel_target[0]);
 
-      DMat best_params;
-      double best_cost = -1;
-      double info[LM_INFO_SZ];
+      double best_cost = greedy_single(rel_target, best_params);
 
-      for (int fit=0; fit<opts.num_fits; ++fit) {
-      
-        DMat fit_params(GABOR_NUM_PARAMS, 1);
-      
-        gabor_random_params(fit_params[0], rng, px_size);
+      std::cout << "best cost replacing " << replace << " at iter " << (iter+1) << " is " << best_cost << "\n";
 
-        double final_cost;
+      if (best_cost < f.cost) {
 
-        if (opts.max_iter > 0) {
-          final_cost = gdata.fit(fit_params[0], opts.max_iter, info, 
-                                 work[0], px_size);
-        } else {
-          final_cost = gdata(fit_params[0]);
-        }
+        std::cout << "better than previous best cost of " << f.cost << "\n";
 
-        if (best_cost < 0 || final_cost < best_cost) {
-          fit_params.copyTo(best_params);
-          best_cost = final_cost;
-        }
 
-        std::cout << '.';
-        std::cout.flush();
-
-      }
-
-      std::cout << "\n";
-
-      if (opts.refine_iter > 0) {
-        best_cost = gdata.fit(best_params[0], opts.refine_iter, 
-                              info, work[0], px_size);
-      }
-
-      std::cout << "cost after model " << (model+1) << " is " << best_cost << "\n";
-
-      if (best_cost < prev_cost) {
+        f.cost = best_cost;
 
         DMat cur_output(size);
         gabor(best_params[0], n, xc[0], yc[0], 
               (double*)NULL, (double*)NULL, cur_output[0], (double*)NULL);
+        
+        f.outputs[replace] = cur_output;
+        f.params[replace] = best_params;
 
         output += cur_output;
-        prev_cost = best_cost;
+
+        save_params(f);
 
         if (opts.gui) {
 
           DMat pout(big_size);
           gabor(best_params[0], big_n, big_xc[0], big_yc[0],
-                (double*)NULL, (double*)NULL, pout[0], (double*)NULL);
+                (double*)NULL, (double*)NULL, 
+                pout[0], (double*)NULL);
         
           preview += pout;
 
-          display(cur_output, output, wmat, error, preview);
+          display(output, preview, cur_output);
+
+        }
+
+      } // if cost improved
+
+    } // for each iter
+
+  } // greedy_replace
+  
+  void greedy_fit(FitData& f, DMat& output, DMat& preview) const {
+
+    DMat error;
+
+    output = DMat(size, 0.0);
+    preview = DMat(big_size, 0.0);
+
+    for (size_t i=0; i<f.outputs.size(); ++i) {
+
+      output += f.outputs[i];
+
+      if (opts.gui) {
+
+        DMat ptmp(big_size);
+        
+        gabor(f.params[i][0], big_n, big_xc[0], big_yc[0], 
+              (const double*)NULL, (const double*)NULL, 
+              ptmp[0], (double*)NULL);
+        
+        preview += ptmp;
+
+      }
+
+    }
+
+    f.cost = weighted_error(target, output, wmat, error, ERR_DISPLAY_POW);
+
+    std::cout << "initial error: " << f.cost << "\n";
+
+    size_t init_model = f.params.size();
+
+    for (size_t model=init_model; model<opts.num_models; ++model) {
+
+      DMat rel_target = target - output;
+
+      DMat best_params;
+
+      double best_cost = greedy_single(rel_target, best_params);
+
+      std::cout << "cost after model " << (model+1) << " is " << best_cost << "\n";
+
+      if (best_cost < f.cost) {
+
+        f.cost = best_cost;
+
+        DMat cur_output(size);
+        gabor(best_params[0], n, xc[0], yc[0], 
+              (double*)NULL, (double*)NULL, cur_output[0], (double*)NULL);
+
+        f.outputs.push_back(cur_output);
+        f.params.push_back(best_params);
+
+        output += cur_output;
+
+        save_params(f);
+
+        if (opts.gui) {
+
+          DMat pout(big_size);
+          gabor(best_params[0], big_n, big_xc[0], big_yc[0],
+                (double*)NULL, (double*)NULL, 
+                pout[0], (double*)NULL);
+        
+          preview += pout;
+
+          display(output, preview, cur_output);
 
         }
 
@@ -335,11 +665,11 @@ public:
 
   }
 
-  void display(const DMat& cur_output,
-               const DMat& output,
-               const DMat& wmat, 
-               DMat& error,
-               const DMat& preview) const {
+  void display(const DMat& output,
+               const DMat& preview,
+               const DMat& cur_output=DMat()) const {
+
+    DMat error;
 
     weighted_error(target, output, wmat, error, ERR_DISPLAY_POW);
 
@@ -347,7 +677,10 @@ public:
     imgs.push_back(target*0.5 + 0.5);
     imgs.push_back(output*0.5 + 0.5);
     imgs.push_back(error);
-    imgs.push_back(cur_output*0.5 + 0.5);
+
+    if (!cur_output.empty()) {
+      imgs.push_back(cur_output*0.5 + 0.5);
+    }
 
     DMat top = hstack(imgs);
 
@@ -357,7 +690,7 @@ public:
     top.copyTo(display(cv::Rect(0, 0, top.cols, top.rows)));
     display(cv::Rect(0, top.rows, preview.cols, preview.rows)) = 0.5*preview + 0.5;
 
-    cv::imshow("foo", display);
+    cv::imshow("ImFit", display);
     cv::waitKey(1);
 
   }
@@ -376,15 +709,29 @@ int main(int argc, char** argv) {
 
   Fitter fitter;
 
+  cv::theRNG() = cv::RNG(mach_absolute_time());
+
   parse_cmdline(argc, argv, fitter.opts);
 
   fitter.init();
 
+
   FitData fdata;
 
-  fitter.multifit(fdata);
+  if (!fitter.opts.input_file.empty()) {
+    fitter.load_params(fdata);
+  }
+
+  DMat output, preview;
+
+  if (fitter.opts.action == "greedyfit") {
+    fitter.greedy_fit(fdata, output, preview);
+  } else if (fitter.opts.action == "replace") {
+    fitter.greedy_replace(fdata, output, preview);
+  }
 
   if (fitter.opts.gui) {
+    fitter.display(output, preview);
     cv::waitKey(0);
   }
 

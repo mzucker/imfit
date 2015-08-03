@@ -64,10 +64,10 @@ int main(int argc, char** argv) {
 
     cv::Mat_<double> target(img_size), orig(img_size), final(img_size), error(img_size);
 
-    gabor_random_params(params[0], rng);
+    gabor_random_params(params[0], 0.05, rng);
     gabor(params[0], sz, xc[0], yc[0], W, NULL, target[0]);
 
-    gabor_random_params(guess[0], rng);
+    gabor_random_params(guess[0], 0.05, rng);
 
     guess = 0.25 * guess + 0.75 * params;
 

@@ -99,6 +99,8 @@ inline void gencoords(const cv::Size& sz,
     fx = f * double(w)/h;
     assert(fy >= fx);
   }
+
+  std::cout << "using fx=" << fx << ", fy=" << fy << "\n";
     
   for (int y=0; y<h; ++y) {
     for (int x=0; x<w; ++x) {
@@ -115,10 +117,9 @@ inline double weighted_error(const DMat& target,
                              DMat& err,
                              double display_pow=0.0) {
 
-  err = target - output;
+  err = output - target;
   if (!wmat.empty()) { err = err.mul(wmat); }
-  err = err.mul(err);
-  double rval = 0.5*cv::sum(err)[0];
+  double rval = 0.5*cv::sum(err.mul(err))[0];
   if (display_pow > 0) {
     for (int i=0; i<err.rows; ++i) {
       for (int j=0; j<err.cols; ++j) {
@@ -131,30 +132,122 @@ inline double weighted_error(const DMat& target,
 }
 
 enum {
-  GABOR_PARAM_U = 0,
-  GABOR_PARAM_V,
-  GABOR_PARAM_R,
-  GABOR_PARAM_L,
-  GABOR_PARAM_S,
-  GABOR_PARAM_T,
-  GABOR_PARAM_P,
-  GABOR_PARAM_H,
-  GABOR_NUM_PARAMS
+  GABOR_PARAM_U = 0,  // in [-1, 1]
+  GABOR_PARAM_V,      // in [-1, 1]
+  GABOR_PARAM_R,      // radians
+  GABOR_PARAM_L,      // in [2.5*px, 4.0]
+  GABOR_PARAM_S,      // in [px, 4.0], we want s >= 0.125*l and s <= 0.5*l
+  GABOR_PARAM_T,      // in [px, 4.0], we want t >= s, and basically unlimited on top
+  GABOR_PARAM_P,      // radians
+  GABOR_PARAM_H,      // in [-2, 2]
+  GABOR_NUM_PARAMS,
+  GABOR_NUM_INEQ=4,
+  GABOR_C_SIZE=GABOR_NUM_INEQ*GABOR_NUM_PARAMS
 };
 
+// old: order was uvrlstph
+//      uv are in [-1,1]
+//      rp are in [-pi,pi]
+//      l is in [0, 4]
+//      s,t are in [0, 2]
+//      h is in [-2, 2]
 
-inline void gabor_random_params(double* params,
-                                cv::RNG& rng = cv::theRNG(),
-                                double px_size=0.05) {
+// new: order is uvrpstlh
+//      uv are in [-1,1]
+//      rp are in [0,2*pi]
+//      stlh are in [0,4]
 
-  params[GABOR_PARAM_U] = rng.uniform(-1.0, 1.0);
-  params[GABOR_PARAM_V] = rng.uniform(-1.0, 1.0);
-  params[GABOR_PARAM_R] = rng.uniform(0.0, 2.0*M_PI);
-  params[GABOR_PARAM_L] = rng.uniform(2.5*px_size, 2.0);
-  params[GABOR_PARAM_S] = rng.uniform(px_size, 1.0);
-  params[GABOR_PARAM_T] = rng.uniform(px_size, 1.0);
-  params[GABOR_PARAM_P] = rng.uniform(0.0, 2*M_PI);
-  params[GABOR_PARAM_H] = rng.uniform(0.1, 1.5);
+inline void gabor_bounds(double px, 
+                         double lb[GABOR_NUM_PARAMS], 
+                         double ub[GABOR_NUM_PARAMS]) {
+
+  if (lb) {
+    lb[GABOR_PARAM_U] = -1.0;
+    lb[GABOR_PARAM_V] = -1.0;
+    lb[GABOR_PARAM_R] = -M_PI;
+    lb[GABOR_PARAM_L] = 2.5*px;
+    lb[GABOR_PARAM_S] = px;
+    lb[GABOR_PARAM_T] = px;
+    lb[GABOR_PARAM_P] = -M_PI;
+    lb[GABOR_PARAM_H] = -2.0;
+  }
+
+  if (ub) {
+    ub[GABOR_PARAM_U] = 1.0;
+    ub[GABOR_PARAM_V] = 1.0;
+    ub[GABOR_PARAM_R] = M_PI;
+    ub[GABOR_PARAM_L] = 4.0;
+    ub[GABOR_PARAM_S] = 2.0;
+    ub[GABOR_PARAM_T] = 2.0;
+    ub[GABOR_PARAM_P] = M_PI;
+    ub[GABOR_PARAM_H] = 2.0;
+  }
+
+}
+
+// constrainst are of the form C*p >= d where
+// C is GABOR_NUM_INEQ-by-GABOR_NUM_PARAMS and
+// d is GABOR_NUM_INEQ-by-
+inline void gabor_ineq(double C[GABOR_C_SIZE],
+                       double d[GABOR_NUM_INEQ]) {
+
+  memset(C, 0, GABOR_C_SIZE*sizeof(double));
+  memset(d, 0, GABOR_NUM_INEQ*sizeof(double));
+
+  // s >= 0.125 * l --> s - 0.125*l >= 0
+  // s <= 0.5* l    --> 0.5*l -  s  >= 0
+  // t >= s         --> t - s       >= 0
+  // t <= 4.0*s     --> 4.0*s - t   >= 0
+  
+  C[GABOR_NUM_PARAMS*0 + GABOR_PARAM_S] =  1.0;
+  C[GABOR_NUM_PARAMS*0 + GABOR_PARAM_L] = -0.03125;
+  
+  C[GABOR_NUM_PARAMS*1 + GABOR_PARAM_S] = -1.0;
+  C[GABOR_NUM_PARAMS*1 + GABOR_PARAM_L] =  0.5;
+
+  C[GABOR_NUM_PARAMS*2 + GABOR_PARAM_S] = -1.0;
+  C[GABOR_NUM_PARAMS*2 + GABOR_PARAM_T] =  1.0;
+
+  C[GABOR_NUM_PARAMS*3 + GABOR_PARAM_S] =  8.0;
+  C[GABOR_NUM_PARAMS*3 + GABOR_PARAM_T] = -1.0;
+
+}
+
+
+inline void gabor_random_params(double* params, double px_size,
+                                cv::RNG& rng) {
+
+  double lb[GABOR_NUM_PARAMS], ub[GABOR_NUM_PARAMS];
+  double C[GABOR_C_SIZE], d[GABOR_NUM_INEQ];
+
+  gabor_bounds(px_size, lb, ub);
+  gabor_ineq(C, d);
+
+  DMat Cmat(GABOR_NUM_INEQ, GABOR_NUM_PARAMS, C);
+  DMat dvec(GABOR_NUM_INEQ, 1, d);
+  DMat pvec(GABOR_NUM_PARAMS, 1, params);
+
+  for (int iter=0; iter<1000; ++iter) {
+
+    for (int i=0; i<GABOR_NUM_PARAMS; ++i) {
+      params[i] = rng.uniform(lb[i], ub[i]);
+    }
+
+    bool ok = true;
+    DMat rvec = Cmat*pvec - dvec;
+
+    for (int j=0; j<GABOR_NUM_INEQ; ++j) {
+      if (rvec(j) < 0) {
+        ok = false;
+      }
+    }
+
+    if (ok) {
+      break;
+    }
+    
+  }
+
 
 }
 
@@ -306,7 +399,7 @@ struct GaborData {
     double* null_opts = 0;
     double* null_cov = 0;
     void* adata = const_cast<GaborData*>(this);
-
+    
     if (!px_size) {
 
       dlevmar_der(gabor_func, gabor_jacf, 
@@ -317,27 +410,20 @@ struct GaborData {
 
     } else {
 
-      double* null_ub = 0;
-      double* null_dscl = 0;
-      
-      double lb[GABOR_NUM_PARAMS];
 
-      for (int i=0; i<GABOR_NUM_PARAMS; ++i) {
-        if (i == GABOR_PARAM_L) {
-          lb[i] = px_size*2.5;
-        } else if (i == GABOR_PARAM_S || i == GABOR_PARAM_T) {
-          lb[i] = px_size;
-        } else {
-          lb[i] = -DBL_MAX;
-        }
-      }
+      double lb[GABOR_NUM_PARAMS], ub[GABOR_NUM_PARAMS];
+      double C[GABOR_C_SIZE], d[GABOR_NUM_INEQ];
 
-      dlevmar_bc_der(gabor_func, gabor_jacf,
-                     params, null_target,
-                     GABOR_NUM_PARAMS, n,
-                     lb, null_ub, null_dscl, 
-                     max_iter, null_opts,
-                     info, work, null_cov, adata);
+      gabor_bounds(px_size, lb, ub);
+      gabor_ineq(C, d);
+
+      dlevmar_blic_der(gabor_func, gabor_jacf,
+                       params, null_target,
+                       GABOR_NUM_PARAMS, n,
+                       lb, ub, 
+                       C, d, GABOR_NUM_INEQ,
+                       max_iter, null_opts,
+                       info, work, null_cov, adata);
 
     }
 
