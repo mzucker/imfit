@@ -134,12 +134,12 @@ inline double weighted_error(const DMat& target,
 enum {
   GABOR_PARAM_U = 0,  // in [-1, 1]
   GABOR_PARAM_V,      // in [-1, 1]
-  GABOR_PARAM_R,      // radians
+  GABOR_PARAM_R,      // radians in [0, 2*pi]
+  GABOR_PARAM_P,      // radians in [0, 2*pi]
   GABOR_PARAM_L,      // in [2.5*px, 4.0]
-  GABOR_PARAM_S,      // in [px, 4.0], we want s >= 0.125*l and s <= 0.5*l
   GABOR_PARAM_T,      // in [px, 4.0], we want t >= s, and basically unlimited on top
-  GABOR_PARAM_P,      // radians
-  GABOR_PARAM_H,      // in [-2, 2]
+  GABOR_PARAM_S,      // in [px, 2.0], we want s >= 0.125*l and s <= 0.5*l
+  GABOR_PARAM_H,      // in [0, 2.0]
   GABOR_NUM_PARAMS,
   GABOR_NUM_INEQ=4,
   GABOR_C_SIZE=GABOR_NUM_INEQ*GABOR_NUM_PARAMS
@@ -152,10 +152,11 @@ enum {
 //      s,t are in [0, 2]
 //      h is in [-2, 2]
 
-// new: order is uvrpstlh
+// new: order is uvrpltsh
 //      uv are in [-1,1]
 //      rp are in [0,2*pi]
-//      stlh are in [0,4]
+//      lt are in [0,4]
+//      sh are in [0,2]
 
 inline void gabor_bounds(double px, 
                          double lb[GABOR_NUM_PARAMS], 
@@ -164,22 +165,22 @@ inline void gabor_bounds(double px,
   if (lb) {
     lb[GABOR_PARAM_U] = -1.0;
     lb[GABOR_PARAM_V] = -1.0;
-    lb[GABOR_PARAM_R] = -M_PI;
+    lb[GABOR_PARAM_R] = 0.0;
+    lb[GABOR_PARAM_P] = 0.0;
     lb[GABOR_PARAM_L] = 2.5*px;
-    lb[GABOR_PARAM_S] = px;
     lb[GABOR_PARAM_T] = px;
-    lb[GABOR_PARAM_P] = -M_PI;
-    lb[GABOR_PARAM_H] = -2.0;
+    lb[GABOR_PARAM_S] = px;
+    lb[GABOR_PARAM_H] = 0.0;
   }
 
   if (ub) {
     ub[GABOR_PARAM_U] = 1.0;
     ub[GABOR_PARAM_V] = 1.0;
-    ub[GABOR_PARAM_R] = M_PI;
+    ub[GABOR_PARAM_R] = 2.0*M_PI;
+    ub[GABOR_PARAM_P] = 2.0*M_PI;
     ub[GABOR_PARAM_L] = 4.0;
+    ub[GABOR_PARAM_T] = 4.0;
     ub[GABOR_PARAM_S] = 2.0;
-    ub[GABOR_PARAM_T] = 2.0;
-    ub[GABOR_PARAM_P] = M_PI;
     ub[GABOR_PARAM_H] = 2.0;
   }
 
@@ -261,10 +262,10 @@ inline double gabor(const T* const params, size_t n,
   const T& u = params[GABOR_PARAM_U];
   const T& v = params[GABOR_PARAM_V];
   const T& r = params[GABOR_PARAM_R];
-  const T& l = params[GABOR_PARAM_L];
-  const T& s = params[GABOR_PARAM_S];
-  const T& t = params[GABOR_PARAM_T];
   const T& p = params[GABOR_PARAM_P];
+  const T& l = params[GABOR_PARAM_L];
+  const T& t = params[GABOR_PARAM_T];
+  const T& s = params[GABOR_PARAM_S];
   const T& h = params[GABOR_PARAM_H];
 
   T cr = cos(r);
@@ -301,6 +302,28 @@ inline double gabor(const T* const params, size_t n,
 
     T ri = Wi * (w * o - Ti);
 
+    /*
+    if (i == 0) {
+
+#define DOUT(var) (std::cout << (#var) << "=" << (var) << "\n")
+      DOUT(xp);
+      DOUT(yp);
+      DOUT(b1);
+      DOUT(b2);
+      DOUT(b12);
+      DOUT(b22);
+      DOUT(w);
+      DOUT(k);
+      DOUT(k);
+      DOUT(ck);
+      DOUT(o);
+      DOUT(Wi);
+      DOUT(Ti);
+      DOUT(ri);
+#undef DOUT
+      std::cout << "\n";
+    }
+    */
     rval += ri * ri;
 
     if (result) {
@@ -352,10 +375,10 @@ inline double gabor(const T* const params, size_t n,
       jacobian[joffs+GABOR_PARAM_U] = dg_du;
       jacobian[joffs+GABOR_PARAM_V] = dg_dv;
       jacobian[joffs+GABOR_PARAM_R] = dg_dr;
-      jacobian[joffs+GABOR_PARAM_L] = dg_dl;
-      jacobian[joffs+GABOR_PARAM_S] = dg_ds;
-      jacobian[joffs+GABOR_PARAM_T] = dg_dt;
       jacobian[joffs+GABOR_PARAM_P] = dg_dp;
+      jacobian[joffs+GABOR_PARAM_L] = dg_dl;
+      jacobian[joffs+GABOR_PARAM_T] = dg_dt;
+      jacobian[joffs+GABOR_PARAM_S] = dg_ds;
       jacobian[joffs+GABOR_PARAM_H] = dg_dh;
 
       joffs += GABOR_NUM_PARAMS;
@@ -394,6 +417,7 @@ struct GaborData {
   
   double fit(double* params, int max_iter,
              double info[LM_INFO_SZ], double* work, double px_size=0) const {
+
 
     double* null_target = 0;
     double* null_opts = 0;

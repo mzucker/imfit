@@ -353,6 +353,9 @@ public:
       gabor(f.params[i][0], n,
             xc[0], yc[0], (const double*)NULL, (const double*)NULL,
             f.outputs[i][0], (double*)NULL);
+
+      //std::cout << "f.params[" << i << "] = " << f.params[i].t() << "\n";
+      //std::cout << "f.outputs[" << i << "] = " << f.outputs[i](cv::Rect(0,0,4,4)) << "\n";
       
       output += f.outputs[i];
 
@@ -698,7 +701,7 @@ public:
     display(cv::Rect(0, top.rows, preview.cols, preview.rows)) = 0.5*preview + 0.5;
 
     cv::imshow("ImFit", display);
-    cv::waitKey(1);
+    cv::waitKey(5);
 
   }
                
