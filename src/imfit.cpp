@@ -12,9 +12,15 @@
 #include <stdlib.h>
 #include <highgui.h>
 #include <cv.h>
-#include "Timer.h"
 #include <time.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#include <errno.h>
+
+#ifdef __APPLE__
+#include <mach/mach_time.h>
+#endif
+
 
 #define ERR_DISPLAY_POW 0.25
 
@@ -356,6 +362,7 @@ public:
 
     f.cost = weighted_error(target, output, wmat, error);
     
+    std::cout << "init cost is " << f.cost << "\n";
 
   }
 
@@ -709,7 +716,14 @@ int main(int argc, char** argv) {
 
   Fitter fitter;
 
+#ifdef __APPLE__
   cv::theRNG() = cv::RNG(mach_absolute_time());
+#else
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  cv::theRNG() = cv::RNG(ts.tv_nsec);
+#endif
+
 
   parse_cmdline(argc, argv, fitter.opts);
 
