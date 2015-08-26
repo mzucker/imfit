@@ -10,10 +10,11 @@ else(APPLE)
 endif(APPLE)
 
 find_package(Ceres)
+find_package(OpenCL)
 
-if (${CERES_FOUND}) 
+if (CERES_FOUND) 
   include_directories(${CERES_INCLUDE_DIRS})
-endif(${CERES_FOUND})
+endif(CERES_FOUND)
 
 include(FindPkgConfig)
 pkg_search_module(OPENCV REQUIRED opencv>=2.3 opencv-2.3.1)
