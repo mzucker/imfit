@@ -307,12 +307,29 @@ inline void gabor_random_params(double* params, double px_size,
 
 }
 
+//////////////////////////////////////////////////////////////////////
+// This is a bit of a gross function because it can not only gabor_evaluate
+// a single Gabor function, but it can also optionally compute the
+// weighted error (difference from target), as well as the Jacobian with
+// respect to each Gabor function parameter.
+//
+// If the weight argument W is NULL, the weights are assumed to be all
+// ones.
+//
+// If the target argument is NULL, the target is assumed to be all
+// zeros.
+//
+// If the jacobian argument is NULL, the Jacobian is not computed.
+//
+// The function returns one half the sum of squared error values.
+
 inline double gabor(const double* const params, size_t n,
                     const double* x, const double* y, 
                     const double* W, const double* target,
                     double* result,
                     double* jacobian=0) {
 
+  // Get params
   const double& u = params[GABOR_PARAM_U];
   const double& v = params[GABOR_PARAM_V];
   const double& r = params[GABOR_PARAM_R];
@@ -322,6 +339,9 @@ inline double gabor(const double* const params, size_t n,
   const double& s = params[GABOR_PARAM_S];
   const double& h = params[GABOR_PARAM_H];
 
+  //////////////////////////////////////////////////
+  // Compute constants for gabor_evaluating Gabor function
+  
   double cr = cos(r);
   double sr = sin(r);
 
@@ -333,9 +353,14 @@ inline double gabor(const double* const params, size_t n,
 
   double rval = 0;
 
+  //////////////////////////////////////////////////
+  // For each pixel (x,y) location:
+
   for (size_t i=0; i<n; ++i) {
 
-
+    //////////////////////////////////////////////////
+    // Gabor_Evaluate Gabor function at (x,y)
+    
     double xp = double(x[i])-u;
     double yp = double(y[i])-v;
 
@@ -354,36 +379,17 @@ inline double gabor(const double* const params, size_t n,
     double Wi = W ? W[i] : 1.0;
     double Ti = target ? target[i] : 0.0;
 
+    // Result for pixel i is equal to weight * (Gabor - target)
     double ri = Wi * (w * o - Ti);
 
-    /*
-    if (i == 0) {
-
-#define DOUT(var) (std::cout << (#var) << "=" << (var) << "\n")
-      DOUT(xp);
-      DOUT(yp);
-      DOUT(b1);
-      DOUT(b2);
-      DOUT(b12);
-      DOUT(b22);
-      DOUT(w);
-      DOUT(k);
-      DOUT(k);
-      DOUT(ck);
-      DOUT(o);
-      DOUT(Wi);
-      DOUT(Ti);
-      DOUT(ri);
-#undef DOUT
-      std::cout << "\n";
-    }
-    */
     rval += ri * ri;
 
+    // Place into result if result non-NULL
     if (result) {
       result[i] = ri;
     }
 
+    // Compute Jacobian at this pixel if jacobian non-NULL
     if (jacobian) {
 
       double dw_db1 = -w * b1 / (s*s);
@@ -441,15 +447,26 @@ inline double gabor(const double* const params, size_t n,
 
   }
 
+  // Return value.
   return 0.5 * rval;
 
 }
 
+// Wrapper to gabor_evaluate gabor() for levmar library without Jacobian.
+// The adata argument will be the ConstantWrapper struct below.
+// Read hx as h(x) where h is our nonlinear function for NLS.
 inline void gabor_func(double* p, double* hx, int m, int n, void* adata);
+
+// Wrapper to gabor_evaluate gabor() Jacobian for levmar library.
+// The adata argument will be the ConstantWrapper struct below.
 inline void gabor_jacf(double* p, double*j, int m, int n, void* adata);
 
-struct GaborData {
-
+//////////////////////////////////////////////////////////////////////
+// The ConstantWrapper struct encapsulates the number of pixels, as
+// well as all of the constants (x & y coordinates, weights, target).
+ 
+struct ConstantWrapper {
+  
   const size_t n;
 
   const double* x;
@@ -457,53 +474,47 @@ struct GaborData {
   const double* W;
   const double* target;
 
-  GaborData(): n(0), x(0), y(0), W(0), target(0) {}
-
-  GaborData(size_t nn, 
+  // Constructor
+  ConstantWrapper(size_t nn, 
             const double* xx,
             const double* yy, 
             const double* WW,
             const double* tt): n(nn), x(xx), y(yy), W(WW), target(tt) {}
 
-  double operator()(const double* p, double* hx=NULL, double* j=NULL) const {
+  // Gabor_Evaluate  function
+  double gabor_eval(const double* p, double* hx=NULL, double* j=NULL) const {
     return gabor(p, n, x, y, W, target, hx, j);
   }
-  
-  double fit(double* params, int max_iter,
-             double info[LM_INFO_SZ], double* work, double px_size=0) const {
 
+  // Fit single  function by invoking levmar library.
+  double gabor_fit(double* params, int max_iter,
+             double info[LM_INFO_SZ], double* work, double px_size) const {
 
-    double* null_target = 0;
-    double* null_opts = 0;
-    double* null_cov = 0;
-    void* adata = const_cast<GaborData*>(this);
-    
-    if (!px_size) {
+    // Don't need target for levmar library because baked into this object.
+    // Similarly default options are fine.
+    // Don't care about covariance matrix.
+    double* null_target = NULL;
+    double* null_opts = NULL;
+    double* null_cov = NULL;
 
-      dlevmar_der(gabor_func, gabor_jacf, 
-                  params, null_target,
-                  GABOR_NUM_PARAMS, n,
-                  max_iter, null_opts, info,
-                  work, null_cov, adata);
+    // Const cast is dirty but acceptable here b/c operator() is const.
+    void* adata = const_cast<ConstantWrapper*>(this);
 
-    } else {
+    assert( px_size );
 
+    double lb[GABOR_NUM_PARAMS], ub[GABOR_NUM_PARAMS];
+    double C[GABOR_C_SIZE], d[GABOR_NUM_INEQ];
 
-      double lb[GABOR_NUM_PARAMS], ub[GABOR_NUM_PARAMS];
-      double C[GABOR_C_SIZE], d[GABOR_NUM_INEQ];
+    gabor_bounds(px_size, lb, ub);
+    gabor_ineq(C, d);
 
-      gabor_bounds(px_size, lb, ub);
-      gabor_ineq(C, d);
-
-      dlevmar_blic_der(gabor_func, gabor_jacf,
-                       params, null_target,
-                       GABOR_NUM_PARAMS, n,
-                       lb, ub, 
-                       C, d, GABOR_NUM_INEQ,
-                       max_iter, null_opts,
-                       info, work, null_cov, adata);
-
-    }
+    dlevmar_blic_der(gabor_func, gabor_jacf,
+                     params, null_target,
+                     GABOR_NUM_PARAMS, n,
+                     lb, ub, 
+                     C, d, GABOR_NUM_INEQ,
+                     max_iter, null_opts,
+                     info, work, null_cov, adata);
 
     return 0.5*info[1];
 
@@ -511,32 +522,33 @@ struct GaborData {
 
 };
 
+// gabor_func just calls operator() on ConstantWrapper. 
 inline void gabor_func(double* p, double* hx, int m, int n, void* adata) {
   assert(m == GABOR_NUM_PARAMS);
-  const GaborData* info = static_cast<const GaborData*>(adata);
-  assert(info->n == n);
-  (*info)(p, hx, NULL);
+  const ConstantWrapper* gcw = static_cast<const ConstantWrapper*>(adata);
+  assert(gcw->n == n);
+  gcw->gabor_eval(p, hx, NULL);
 }
 
+// gabor_jacf just calls operator() on ConstantWrapper.
 inline void gabor_jacf(double* p, double*j, int m, int n, void* adata) {
   assert(m == GABOR_NUM_PARAMS);
-  const GaborData* info = static_cast<const GaborData*>(adata);
-  assert(info->n == n);
-  (*info)(p, NULL, j);
+  const ConstantWrapper* gcw = static_cast<const ConstantWrapper*>(adata);
+  assert(gcw->n == n);
+  gcw->gabor_eval(p, NULL, j);
 }
 
 
-#define ERR_DISPLAY_POW 0.25
+//////////////////////////////////////////////////////////////////////
+// Struct to hold all command-line options.
 
-struct ImFitOptions {
+struct Options {
 
   std::string image_file;  // positional
 
   std::string weight_file; // w
   std::string input_file;  // i 
   std::string output_file; // o
-
-  std::string action;      // a
 
   int num_models;          // n
   int greedy_num_fits;     // f
@@ -547,9 +559,9 @@ struct ImFitOptions {
   int preview_size;        // p
   int full_iter;           // F
   double full_alpha;       // A
-  bool gui;                // g
+  bool show_gui;           // g
 
-  ImFitOptions() {
+  Options() {
 
     char buf[1024];
 
@@ -563,11 +575,10 @@ struct ImFitOptions {
 
     num_models = 64;
 
-    action = "greedyfit";
     greedy_num_fits = 100;
     greedy_init_iter = 10;
     greedy_refine_iter = 100;
-    greedy_replace_iter = 100000; // probably Ctrl+C before then
+    greedy_replace_iter = 100000; // user probably hits Ctrl+C before this happens
 
     max_size = 32;
     preview_size = 512;
@@ -575,11 +586,14 @@ struct ImFitOptions {
     full_iter = 100;
     full_alpha = 4e-5;
 
-    gui = true;
+    show_gui = true;
 
   }
 
 };
+
+//////////////////////////////////////////////////////////////////////
+// Show usage options
 
 void usage(std::ostream& ostr=std::cerr, int code=1) {
 
@@ -601,12 +615,14 @@ void usage(std::ostream& ostr=std::cerr, int code=1) {
     "  -F, --full-iter=NUM      Maximum # of iterations for full refinement\n"
     "  -A, --full-alpha=NUM     Step size for full refinement\n"
     "  -R, --replace-iter=NUM   Maximum # of iterations for replacement\n"
-    "  -a, --action=STR         Action to perform (greedyfit,replace)\n"        
     "  -h, --help               See this message\n";
 
   exit(code);
 
 }
+
+//////////////////////////////////////////////////////////////////////
+// Get real # from command-line arg str
 
 double getdouble(const char* str) {
   char* endptr;
@@ -621,9 +637,8 @@ double getdouble(const char* str) {
   return d;
 }
 
-/* Converts string to long - also not used?
- * see getdouble for logic
- */
+//////////////////////////////////////////////////////////////////////
+// Get signed integer from command-line arg str
 
 long getlong(const char* str) {
   char* endptr;
@@ -635,6 +650,9 @@ long getlong(const char* str) {
   return d;
 }
 
+//////////////////////////////////////////////////////////////////////
+// Get name of existing file from command-line arg str
+
 std::string getinputfile(const char* str) {
   std::ifstream istr(str);
   if (!istr.is_open()) {
@@ -644,7 +662,10 @@ std::string getinputfile(const char* str) {
   return str;
 }
 
-void parse_cmdline(int argc, char** argv, ImFitOptions& opts) {
+//////////////////////////////////////////////////////////////////////
+// Parse command line
+
+void parse_cmdline(int argc, char** argv, Options& opts) {
 
   const struct option long_options[] = {
     { "num-models",          required_argument, 0, 'n' },
@@ -659,7 +680,6 @@ void parse_cmdline(int argc, char** argv, ImFitOptions& opts) {
     { "full-iter",           required_argument, 0, 'f' },
     { "replace-iter",        required_argument, 0, 'R' },
     { "full-alpha",          required_argument, 0, 'A' },
-    { "action",              required_argument, 0, 'a' },
     { "no-gui",              no_argument,       0, 'g' },
     { "help",                no_argument,       0, 'h' },
     { 0,                     0,                 0,  0  },
@@ -682,20 +702,14 @@ void parse_cmdline(int argc, char** argv, ImFitOptions& opts) {
     case 'p': opts.preview_size = getlong(optarg); break;
     case 'i': opts.input_file = optarg; break;
     case 'o': opts.output_file = optarg; break;
-    case 'a': opts.action = optarg; break;
     case 'F': opts.full_iter = getlong(optarg); break;
     case 'A': opts.full_alpha = getdouble(optarg); break;
     case 'R': opts.greedy_replace_iter = getlong(optarg); break;
-    case 'g': opts.gui = false; break;
+    case 'g': opts.show_gui = false; break;
     case 'h': usage(std::cout, 0); break;
     default: usage(); break;
     }
 
-  }
-
-  if (opts.action != "greedyfit" && opts.action != "replace") {
-    std::cerr << "error: action must be one of greedyfit, replace!\n\n";
-    usage(std::cerr, 1);
   }
 
   if (optind != argc-1) { 
@@ -706,12 +720,14 @@ void parse_cmdline(int argc, char** argv, ImFitOptions& opts) {
 
 }
 
-class FitData {
-public:
+//////////////////////////////////////////////////////////////////////
+// Encapsulate parameters and results of Gabor fit.
 
-  double cost;
-  std::vector<DMat> outputs;
+struct FitData {
+
   std::vector<DMat> params;
+  std::vector<DMat> outputs;
+  double cost;
 
   FitData(): cost(DBL_MAX) {}
 
@@ -726,51 +742,70 @@ public:
   
 };
 
+//////////////////////////////////////////////////////////////////////
+// Class to actually do all of the work.
+
+#define ERR_DISPLAY_POW 0.25
+
 class Fitter {
 public:
 
-  ImFitOptions opts;
+  // Options
+  const Options& opts;
 
+  // Image size and preview/output size
   cv::Size size;
-  cv::Size big_size;
+  cv::Size preview_size;
 
+  // Products of size and preview_size
   size_t   n;
-  size_t   big_n;
+  size_t   preview_n;
 
+  // Target and weight matrices.
   DMat     target;
   DMat     wmat;
 
+  // W points to either weight matrix or NULL if no weights loaded.
   const double *W;
 
-  DMat     xc, yc, big_xc, big_yc;
+  // Matrices for x & y coords for both regular and preview.
+  DMat     xc, yc, preview_xc, preview_yc;
+
+  // Pixel size (based upon original image size)
   double   px_size;
 
-  Fitter() {}
-
-  void init() {
+  Fitter(const Options& o):
+    opts(o)
+  {
 
     //////////////////////////////////////////////////
     // Load images
 
     UMat gray = cv::imread(opts.image_file, CV_LOAD_IMAGE_GRAYSCALE);
+    if (gray.empty()) {
+      std::cerr << "error reading image from " << opts.image_file << "!\n";
+      exit(1);
+    }
+    std::cout << "loaded image " << opts.image_file
+              << " with size " << gray.size() << "\n";
 
     UMat weights;
     if (!opts.weight_file.empty()) {
       weights = cv::imread(opts.weight_file, CV_LOAD_IMAGE_GRAYSCALE);
       if (weights.size() != gray.size()) {
         std::cerr << "weight file must have same size as image file!\n";
-        exit(0);
+        exit(1);
       }
+      std::cout << "loaded weights from " << opts.weight_file << "\n";
     }
 
     //////////////////////////////////////////////////
     // Downsample if necessary
 
     size = gray.size();
-    std::cout << "input image is " << size << "\n";
 
     if (scale_size(size, opts.max_size, SCALE_REDUCE_ONLY, size)) {
-      std::cout << "resizing to " << size << "\n";
+      std::cout << "resizing image to " << size << "\n";
       UMat tmp;
       cv::resize(gray, tmp, size, 0, 0, cv::INTER_AREA);
       tmp.copyTo(gray);
@@ -780,14 +815,14 @@ public:
       }
     }
   
-    big_size = size;
-    scale_size(size, opts.preview_size, SCALE_ALWAYS, big_size);
+    preview_size = size;
+    scale_size(size, opts.preview_size, SCALE_ALWAYS, preview_size);
 
     //////////////////////////////////////////////////
     // Convert to float
   
     n = size.width * size.height;
-    big_n = big_size.width * big_size.height;
+    preview_n = preview_size.width * preview_size.height;
 
     gray.convertTo(target, CV_64F);
     target -= cv::mean(target)[0];
@@ -806,18 +841,18 @@ public:
     // Generate coords, output, problem setup
 
     gencoords(size, xc, yc);
+    gencoords(preview_size, preview_xc, preview_yc);
 
     px_size = xc(0, 1) - xc(0, 0);
-
-    gencoords(big_size, big_xc, big_yc);
-
+    
   }
+
+  //////////////////////////////////////////////////////////////////////
+  // Load params into fit data and fill in outputs and initial cost.
 
   void load_params(FitData& f) const {
 
     std::vector<DMat> ptmp;
-
-    std::cout << "at " << __FILE__ << ":" << __LINE__ << "\n";
 
     std::ifstream istr(opts.input_file.c_str());
     if (!istr.is_open()) {
@@ -825,15 +860,11 @@ public:
       exit(1);
     }
 
-    std::cout << "at " << __FILE__ << ":" << __LINE__ << "\n";
-
     size_t psz;
     if (!(istr >> psz)) { 
       std::cerr << "error getting # params\n";
       exit(1);
     }
-
-    std::cout << "at " << __FILE__ << ":" << __LINE__ << "\n";
 
     for (size_t i=0; i<psz; ++i) {
       DMat pi(GABOR_NUM_PARAMS, 1);
@@ -846,38 +877,34 @@ public:
       ptmp.push_back(pi);
     }
 
-    std::cout << "at " << __FILE__ << ":" << __LINE__ << "\n";
-
     f.cost = DBL_MAX;
     f.params.swap(ptmp);
-    f.outputs.resize(f.params.size());
 
-    std::cout << "at " << __FILE__ << ":" << __LINE__ << "\n";
-    
     DMat output(size, 0.0);
+    compute_initial_cost(f, output);
+
+  }
+
+  void compute_initial_cost(FitData& f, DMat& output) const {
+    
+    f.outputs.resize(f.params.size());
+    
+    ConstantWrapper cw(n, xc[0], yc[0], NULL, NULL);
 
     for (size_t i=0; i<f.params.size(); ++i) {
-
       f.outputs[i] = DMat(size);
-      
-      gabor(f.params[i][0], n,
-            xc[0], yc[0], (const double*)NULL, (const double*)NULL,
-            f.outputs[i][0], (double*)NULL);
-
-      //std::cout << "f.params[" << i << "] = " << f.params[i].t() << "\n";
-      //std::cout << "f.outputs[" << i << "] = " << f.outputs[i](cv::Rect(0,0,4,4)) << "\n";
-      
+      cw.gabor_eval(f.params[i][0], f.outputs[i][0], NULL);
       output += f.outputs[i];
-
     }
 
     DMat error;
 
     f.cost = weighted_error(target, output, wmat, error);
     
-    std::cout << "init cost is " << f.cost << "\n";
-
   }
+
+  //////////////////////////////////////////////////////////////////////
+  // Save params from fit data
 
   void save_params(const FitData& f) const {
 
@@ -886,6 +913,7 @@ public:
       std::cerr << "can't write " << opts.output_file << "!\n";
       exit(1);
     }
+    
     ostr << f.params.size() << "\n";
     for (size_t i=0; i<f.params.size(); ++i) {
       assert(f.params[i].size() == cv::Size(1, GABOR_NUM_PARAMS));
@@ -912,90 +940,29 @@ public:
 
   }
 
-  void full_refine(FitData& f, DMat output, DMat& preview) const {
-
-    const double stepsize = opts.full_alpha / f.params.size();
-
-
-    for (int iter=0; iter<=opts.full_iter; ++iter) {
-
-      output = DMat(size, 0.0);
-      preview = DMat(big_size, 0.0);
-
-      // get outputs
-      for (size_t i=0; i<f.outputs.size(); ++i) {
-
-        DMat cur_output(size);
-        DMat ptmp(big_size);
-        
-        gabor(f.params[i][0], n,
-              xc[0], yc[0], (const double*)NULL, (const double*)NULL,
-              f.outputs[i][0], (double*)NULL);
-
-        output += f.outputs[i];
-
-        if (opts.gui) {
-
-          DMat ptmp(big_size);
-          
-          gabor(f.params[i][0], big_n, big_xc[0], big_yc[0],
-                (const double*) NULL, (const double*)NULL, 
-                ptmp[0], (double*)NULL);
-
-          preview += ptmp;
-
-        }
-
-      }
-
-      DMat error;
-
-      // get cost/error vector
-      f.cost = weighted_error(target, output, wmat, error);
-
-      std::cout << "cost at full iter " << (iter+1) << " is " << f.cost << "\n";
-
-
-      if (opts.gui) {
-
-        display(output, preview);
-
-      }
-
-      if (iter == opts.full_iter) {
-        break;
-      }
-
-      DMat jac(n, GABOR_NUM_PARAMS);
-
-      // take gradient step
-      for (size_t i=0; i<f.outputs.size(); ++i) {
-
-        gabor(f.params[i][0], n,
-              xc[0], yc[0], W, (const double*)NULL,
-              (double*)NULL, jac[0]);
-
-        f.params[i] -= stepsize * (jac.t() * error.reshape(0, n));
-
-      }
-
-    }
-
-  }
+  //////////////////////////////////////////////////////////////////////
+  // Fit a single gabor function to eliminate the given residual.
   
-  double greedy_single(const DMat& rel_target, DMat& best_params) const {
+  double fit_single(const DMat& residual, DMat& best_params) const {
 
-    GaborData gdata(n, xc[0], yc[0], W, rel_target[0]);
+    ConstantWrapper cw(n, xc[0], yc[0], W, residual[0]);
     
     double best_cost = -1;
     double info[LM_INFO_SZ];
     
     DMat work(LM_BLEIC_DER_WORKSZ(GABOR_NUM_PARAMS, n, 0, GABOR_NUM_INEQ), 1);
 
+    //////////////////////////////////////////////////
+    // Single fit step 1: try current params (if they exist), as well
+    // as a number of random param vectors, pocket the best result.
+    // Do a minor amount of refining work for each try.
+
     for (int fit=0; fit<opts.greedy_num_fits; ++fit) {
       
       DMat fit_params(GABOR_NUM_PARAMS, 1);
 
+      // Only grab current best if exists and first iteration,
+      // otherwise choose random.
       if (fit == 0 && !best_params.empty()) {
         best_params.copyTo(fit_params);
       } else {
@@ -1004,13 +971,16 @@ public:
 
       double final_cost;
 
+      // Do a minor amount of refinement if allowed, otherwise, just
+      // get cost.
       if (opts.greedy_init_iter > 0) {
-        final_cost = gdata.fit(fit_params[0], opts.greedy_init_iter, 
-                               info, work[0], px_size);
+        final_cost = cw.gabor_fit(fit_params[0], opts.greedy_init_iter, 
+                                  info, work[0], px_size);
       } else {
-        final_cost = gdata(fit_params[0]);
+        final_cost = cw.gabor_eval(fit_params[0]);
       }
 
+      // If improved, pocket result.
       if (best_cost < 0 || final_cost < best_cost) {
         fit_params.copyTo(best_params);
         best_cost = final_cost;
@@ -1023,66 +993,177 @@ public:
 
     std::cout << "\n";
 
+    // Do a significant amount of refinement on the best param vector
+    // found.
     if (opts.greedy_refine_iter > 0) {
-      best_cost = gdata.fit(best_params[0], opts.greedy_refine_iter, 
-                            info, work[0], px_size);
+      best_cost = cw.gabor_fit(best_params[0], opts.greedy_refine_iter, 
+                               info, work[0], px_size);
     }
 
     return best_cost;
 
   }
 
-  void greedy_replace(FitData& f, DMat& output, DMat& preview) const {
+  //////////////////////////////////////////////////////////////////////
+  // Incrementally add models, one-at-a-time, to eliminate residual.
+  
+  void add_models(FitData& f, DMat& output, DMat& preview) const {
 
+    // Allocate output
+    output = DMat(size, 0.0);
+
+    // See if we need to prune instead
+    if (f.params.size() > opts.num_models) {
+
+      std::cout << "warning: pruning down to " << opts.num_models << " models!\n";
+      cv::Mat_<size_t> idx(f.params.size(), 1);
+      for (size_t i=0; i<f.params.size(); ++i) {
+        idx(i) = i;
+      }
+
+      cv::randShuffle(idx);
+
+      std::vector<DMat> keep_params;
+      for (size_t i=0; i<opts.num_models; ++i) {
+        size_t j = idx(i);
+        keep_params.push_back( f.params[j] );
+      }
+
+      keep_params.swap(f.params);
+
+      compute_initial_cost(f, output);
+
+    }
+
+    // Allocate preview
+    preview = DMat(preview_size, 0.0);
+
+    
+    ConstantWrapper preview_cw(preview_n, preview_xc[0], preview_yc[0],
+                               NULL, NULL);
+    
+
+    // Compose all outputs and preview
+    for (size_t i=0; i<f.outputs.size(); ++i) {
+
+      output += f.outputs[i];
+
+      if (opts.show_gui) {
+        DMat ptmp(preview_size);
+        preview_cw.gabor_eval(f.params[i][0], ptmp[0], NULL);
+        preview += ptmp;
+      }
+
+    }
+
+    // Get initial error
+    DMat error;
+    f.cost = weighted_error(target, output, wmat, error, ERR_DISPLAY_POW);
+    std::cout << "initial error: " << f.cost << "\n";
+
+    ConstantWrapper cw(n, xc[0], yc[0], NULL, NULL);
+
+    // For each model we want to add
+    for (size_t model=f.params.size(); model<opts.num_models; ++model) {
+
+      // Compute residual
+      DMat residual = target - output;
+
+      // Fit parameters
+      DMat new_params;
+      f.cost = fit_single(residual, new_params);
+      std::cout << "error after adding model " << (model+1) << " is " << f.cost << "\n";
+
+      // Get model output
+      DMat new_output(size);
+      cw.gabor_eval(new_params[0], new_output[0], NULL);
+
+      // Update FitData
+      f.outputs.push_back(new_output);
+      f.params.push_back(new_params);
+
+      // Update output
+      output += new_output;
+
+      // Save params
+      save_params(f);
+
+      // Update GUI
+      if (opts.show_gui) {
+
+        DMat pout(preview_size);
+        
+        preview_cw.gabor_eval(best_params[0], pout[0], NULL);
+        preview += pout;
+        display(output, preview, new_output);
+        
+      }
+
+    } // for each model to add
+
+  } // add_models
+
+
+  //////////////////////////////////////////////////////////////////////
+  // For a LARGE number of iterations, choose a random model to
+  // replace, and see if you can improve it. This is greedy
+  // hill-climbing, one model at a time.
+
+  void replace_models(FitData& f, DMat& output, DMat& preview) const {
+
+    // Large number of iterations
 
     for (int iter=0; iter<opts.greedy_replace_iter; ++iter) {
 
       DMat error;
 
+      // Choose which model to replace
       size_t replace = cv::theRNG().uniform(0, f.outputs.size());
 
       output = DMat(size, 0.0);
-      preview = DMat(big_size, 0.0);
+      preview = DMat(preview_size, 0.0);
 
+      ConstantWrapper preview_cw(preview_n, preview_xc[0], preview_yc[0],
+                                 NULL, NULL);
+
+      // Add up outputs of all models but the one to replace
       for (size_t i=0; i<f.outputs.size(); ++i) {
 
         if (i != replace) {
 
           output += f.outputs[i];
 
-          if (opts.gui) {
-
-            DMat ptmp(big_size);
-        
-            gabor(f.params[i][0], big_n, big_xc[0], big_yc[0], 
-                  (const double*)NULL, (const double*)NULL, 
-                  ptmp[0], (double*)NULL);
-        
+          if (opts.show_gui) {
+            DMat ptmp(preview_size);
+            preview_cw.gabor_eval(f.params[i][0], ptmp[0], NULL);
             preview += ptmp;
-
           }
 
         }
 
       }
 
+      // Try replacing it
       DMat best_params = f.params[replace].clone();
-      DMat rel_target = target - output;
+      DMat residual = target - output;
 
-      double best_cost = greedy_single(rel_target, best_params);
+      double best_cost = fit_single(residual, best_params);
 
-      std::cout << "best cost replacing " << replace << " at iter " << (iter+1) << " is " << best_cost << "\n";
+      std::cout << "best error replacing " << replace << " "
+                << "at iter " << (iter+1) << " is " << best_cost << "\n";
 
+      // If improved, update params & display
       if (best_cost < f.cost) {
-
-        std::cout << "better than previous best cost of " << f.cost << "\n";
-
+        
+        std::cout << "better than previous best error of " << f.cost << "\n";
 
         f.cost = best_cost;
 
+        ConstantWrapper cw(n, xc[0], yc[0], NULL, NULL);
+        
         DMat cur_output(size);
-        gabor(best_params[0], n, xc[0], yc[0], 
-              (double*)NULL, (double*)NULL, cur_output[0], (double*)NULL);
+
+        cw.gabor_eval(best_params[0], cur_output[0], NULL);
         
         f.outputs[replace] = cur_output;
         f.params[replace] = best_params;
@@ -1091,12 +1172,11 @@ public:
 
         save_params(f);
 
-        if (opts.gui) {
+        if (opts.show_gui) {
 
-          DMat pout(big_size);
-          gabor(best_params[0], big_n, big_xc[0], big_yc[0],
-                (double*)NULL, (double*)NULL, 
-                pout[0], (double*)NULL);
+          DMat pout(preview_size);
+
+          preview_cw.gabor_eval(best_params[0], pout[0], NULL);
         
           preview += pout;
 
@@ -1109,81 +1189,9 @@ public:
     } // for each iter
 
   } // greedy_replace
-  
-  void greedy_fit(FitData& f, DMat& output, DMat& preview) const {
 
-    DMat error;
-
-    output = DMat(size, 0.0);
-    preview = DMat(big_size, 0.0);
-
-    for (size_t i=0; i<f.outputs.size(); ++i) {
-
-      output += f.outputs[i];
-
-      if (opts.gui) {
-
-        DMat ptmp(big_size);
-        
-        gabor(f.params[i][0], big_n, big_xc[0], big_yc[0], 
-              (const double*)NULL, (const double*)NULL, 
-              ptmp[0], (double*)NULL);
-        
-        preview += ptmp;
-
-      }
-
-    }
-
-    f.cost = weighted_error(target, output, wmat, error, ERR_DISPLAY_POW);
-
-    std::cout << "initial error: " << f.cost << "\n";
-
-    size_t init_model = f.params.size();
-
-    for (size_t model=init_model; model<opts.num_models; ++model) {
-
-      DMat rel_target = target - output;
-
-      DMat best_params;
-
-      double best_cost = greedy_single(rel_target, best_params);
-
-      std::cout << "cost after model " << (model+1) << " is " << best_cost << "\n";
-
-      if (best_cost < f.cost) {
-
-        f.cost = best_cost;
-
-        DMat cur_output(size);
-        gabor(best_params[0], n, xc[0], yc[0], 
-              (double*)NULL, (double*)NULL, cur_output[0], (double*)NULL);
-
-        f.outputs.push_back(cur_output);
-        f.params.push_back(best_params);
-
-        output += cur_output;
-
-        save_params(f);
-
-        if (opts.gui) {
-
-          DMat pout(big_size);
-          gabor(best_params[0], big_n, big_xc[0], big_yc[0],
-                (double*)NULL, (double*)NULL, 
-                pout[0], (double*)NULL);
-        
-          preview += pout;
-
-          display(output, preview, cur_output);
-
-        }
-
-      }
-
-    }
-
-  }
+  //////////////////////////////////////////////////////////////////////
+  // Display graphical output/preview
 
   void display(const DMat& output,
                const DMat& preview,
@@ -1215,19 +1223,12 @@ public:
 
   }
                
-  
-
 };
 
-/* TODO: make constraints 
-     - bounded wavelength (no smaller than X)
-     - bounded scale [no smaller than 0.25 wavelength]
-*/
+//////////////////////////////////////////////////////////////////////
+// Main function just strings together all things above.
 
 int main(int argc, char** argv) {
-
-
-  Fitter fitter;
 
 #ifdef __APPLE__
   cv::theRNG() = cv::RNG(mach_absolute_time());
@@ -1237,35 +1238,25 @@ int main(int argc, char** argv) {
   cv::theRNG() = cv::RNG(ts.tv_nsec);
 #endif
 
+  Options opts;
 
-  parse_cmdline(argc, argv, fitter.opts);
+  parse_cmdline(argc, argv, opts);
 
-  fitter.init();
-
+  Fitter fitter(opts);
 
   FitData fdata;
 
-  if (!fitter.opts.input_file.empty()) {
+  if (!opts.input_file.empty()) {
     fitter.load_params(fdata);
   }
 
   DMat output, preview;
 
-  if (fitter.opts.action == "greedyfit") {
-    if (fdata.params.size() >= fitter.opts.num_models) {
-      std::cerr << "skipping greedyfit because already have " << fdata.params.size() << " models!\n";
-      exit(1);
-    }
-    fitter.greedy_fit(fdata, output, preview);
-  } else if (fitter.opts.action == "replace") {
-    if (fdata.params.empty()) {
-      std::cerr << "skipping replace because no models (run greedy fit first?)\n";
-      exit(1);
-    }
-    fitter.greedy_replace(fdata, output, preview);
-  }
+  fitter.add_models(fdata, output, preview);
 
-  if (fitter.opts.gui) {
+  fitter.replace_models(fdata, output, preview);
+
+  if (opts.show_gui) {
     fitter.display(output, preview);
     cv::waitKey(0);
   }
