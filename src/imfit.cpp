@@ -1093,7 +1093,7 @@ public:
 
         DMat pout(preview_size);
         
-        preview_cw.gabor_eval(best_params[0], pout[0], NULL);
+        preview_cw.gabor_eval(new_params[0], pout[0], NULL);
         preview += pout;
         display(output, preview, new_output);
         
@@ -1251,6 +1251,10 @@ int main(int argc, char** argv) {
   }
 
   DMat output, preview;
+
+  if (opts.show_gui) {
+    cv::namedWindow("ImFit");
+  }
 
   fitter.add_models(fdata, output, preview);
 
