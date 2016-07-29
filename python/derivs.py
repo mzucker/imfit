@@ -1,3 +1,5 @@
+# Use sympy to verify derivatives of Gabor function
+
 import sympy
 
 def check_deriv(name, expr, var, expected):
@@ -7,8 +9,9 @@ def check_deriv(name, expr, var, expected):
     print '  expected:', expected
     print '    actual:', actual
     print '      diff:', diff
-    print
     assert( diff == 1 )
+    print '    result: success!'
+    print
 
 x, y, u, v, r, l, s, t, p, h = sympy.symbols('x,y,u,v,r,l,s,t,p,h', real=True)
 
