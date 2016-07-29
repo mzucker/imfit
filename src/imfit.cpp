@@ -307,28 +307,27 @@ inline void gabor_random_params(double* params, double px_size,
 
 }
 
-template <class T>
-inline double gabor(const T* const params, size_t n,
+inline double gabor(const double* const params, size_t n,
                     const double* x, const double* y, 
                     const double* W, const double* target,
-                    T* result,
-                    T* jacobian=0) {
+                    double* result,
+                    double* jacobian=0) {
 
-  const T& u = params[GABOR_PARAM_U];
-  const T& v = params[GABOR_PARAM_V];
-  const T& r = params[GABOR_PARAM_R];
-  const T& p = params[GABOR_PARAM_P];
-  const T& l = params[GABOR_PARAM_L];
-  const T& t = params[GABOR_PARAM_T];
-  const T& s = params[GABOR_PARAM_S];
-  const T& h = params[GABOR_PARAM_H];
+  const double& u = params[GABOR_PARAM_U];
+  const double& v = params[GABOR_PARAM_V];
+  const double& r = params[GABOR_PARAM_R];
+  const double& p = params[GABOR_PARAM_P];
+  const double& l = params[GABOR_PARAM_L];
+  const double& t = params[GABOR_PARAM_T];
+  const double& s = params[GABOR_PARAM_S];
+  const double& h = params[GABOR_PARAM_H];
 
-  T cr = cos(r);
-  T sr = sin(r);
+  double cr = cos(r);
+  double sr = sin(r);
 
-  T f = T(2.0*M_PI)/l;
-  T s2 = s*s;
-  T t2 = t*t;
+  double f = double(2.0*M_PI)/l;
+  double s2 = s*s;
+  double t2 = t*t;
 
   size_t joffs = 0;
 
@@ -337,25 +336,25 @@ inline double gabor(const T* const params, size_t n,
   for (size_t i=0; i<n; ++i) {
 
 
-    T xp = T(x[i])-u;
-    T yp = T(y[i])-v;
+    double xp = double(x[i])-u;
+    double yp = double(y[i])-v;
 
-    T b1 = cr*xp + sr*yp;
-    T b2 = -sr*xp + cr*yp;
+    double b1 = cr*xp + sr*yp;
+    double b2 = -sr*xp + cr*yp;
 
-    T b12 = b1*b1;
-    T b22 = b2*b2;
+    double b12 = b1*b1;
+    double b22 = b2*b2;
 
-    T w = exp(-b12/(T(2.0)*s2) - b22/(T(2.0)*t2));
+    double w = exp(-b12/(double(2.0)*s2) - b22/(double(2.0)*t2));
 
-    T k = f*b1 + p;
-    T ck = cos(k);
-    T o = h * ck;
+    double k = f*b1 + p;
+    double ck = cos(k);
+    double o = h * ck;
 
-    T Wi = W ? W[i] : 1.0;
-    T Ti = target ? target[i] : 0.0;
+    double Wi = W ? W[i] : 1.0;
+    double Ti = target ? target[i] : 0.0;
 
-    T ri = Wi * (w * o - Ti);
+    double ri = Wi * (w * o - Ti);
 
     /*
     if (i == 0) {
@@ -387,45 +386,45 @@ inline double gabor(const T* const params, size_t n,
 
     if (jacobian) {
 
-      T dw_db1 = -w * b1 / (s*s);
-      T dw_db2 = -w * b2 / (t*t);
+      double dw_db1 = -w * b1 / (s*s);
+      double dw_db2 = -w * b2 / (t*t);
 
-      T db1_du = -cr;
-      T db1_dv = -sr;
-      T db1_dr = b2;
+      double db1_du = -cr;
+      double db1_dv = -sr;
+      double db1_dr = b2;
 
-      T db2_du = sr;
-      T db2_dv = -cr;
-      T db2_dr = -b1;
+      double db2_du = sr;
+      double db2_dv = -cr;
+      double db2_dr = -b1;
 
-      T dw_du = dw_db1 * db1_du + dw_db2 * db2_du;
-      T dw_dv = dw_db1 * db1_dv + dw_db2 * db2_dv;
-      T dw_dr = dw_db1 * db1_dr + dw_db2 * db2_dr;
-      T dw_ds = w * b12 / (s2*s);
-      T dw_dt = w * b22 / (t2*t);
+      double dw_du = dw_db1 * db1_du + dw_db2 * db2_du;
+      double dw_dv = dw_db1 * db1_dv + dw_db2 * db2_dv;
+      double dw_dr = dw_db1 * db1_dr + dw_db2 * db2_dr;
+      double dw_ds = w * b12 / (s2*s);
+      double dw_dt = w * b22 / (t2*t);
 
-      T dk_db1 = f;
-      T dk_dp = 1;
-      T dck = -sin(k);
+      double dk_db1 = f;
+      double dk_dp = 1;
+      double dck = -sin(k);
       
-      T do_db1 = h * dck * dk_db1;
+      double do_db1 = h * dck * dk_db1;
 
-      T do_dp = h * dck * dk_dp;
-      T do_dh = ck;
+      double do_dp = h * dck * dk_dp;
+      double do_dh = ck;
 
-      T do_du = do_db1 * db1_du;
-      T do_dv = do_db1 * db1_dv;
-      T do_dr = do_db1 * db1_dr;
-      T do_dl = -do_db1 * b1 /l;
+      double do_du = do_db1 * db1_du;
+      double do_dv = do_db1 * db1_dv;
+      double do_dr = do_db1 * db1_dr;
+      double do_dl = -do_db1 * b1 /l;
 
-      T dg_du = Wi * (dw_du * o + w * do_du);
-      T dg_dv = Wi * (dw_dv * o + w * do_dv);
-      T dg_dr = Wi * (dw_dr * o + w * do_dr);
-      T dg_dl = Wi * (w * do_dl);
-      T dg_ds = Wi * (dw_ds * o);
-      T dg_dt = Wi * (dw_dt * o);
-      T dg_dp = Wi * (w * do_dp);
-      T dg_dh = Wi * (w * do_dh);
+      double dg_du = Wi * (dw_du * o + w * do_du);
+      double dg_dv = Wi * (dw_dv * o + w * do_dv);
+      double dg_dr = Wi * (dw_dr * o + w * do_dr);
+      double dg_dl = Wi * (w * do_dl);
+      double dg_ds = Wi * (dw_ds * o);
+      double dg_dt = Wi * (dw_dt * o);
+      double dg_dp = Wi * (w * do_dp);
+      double dg_dh = Wi * (w * do_dh);
 
       jacobian[joffs+GABOR_PARAM_U] = dg_du;
       jacobian[joffs+GABOR_PARAM_V] = dg_dv;
@@ -561,17 +560,16 @@ struct ImFitOptions {
     strftime(buf, 1024, "params_%Y%j%H%M%S.txt", &thetime);
 
     output_file = buf;
-    std::cout << "output_file = " << output_file << "\n";
 
-    num_models = 150;
+    num_models = 64;
 
     action = "greedyfit";
     greedy_num_fits = 100;
     greedy_init_iter = 10;
     greedy_refine_iter = 100;
-    greedy_replace_iter = 100000;
+    greedy_replace_iter = 100000; // probably Ctrl+C before then
 
-    max_size = 0;
+    max_size = 32;
     preview_size = 512;
 
     full_iter = 100;
@@ -695,6 +693,11 @@ void parse_cmdline(int argc, char** argv, ImFitOptions& opts) {
 
   }
 
+  if (opts.action != "greedyfit" && opts.action != "replace") {
+    std::cerr << "error: action must be one of greedyfit, replace!\n\n";
+    usage(std::cerr, 1);
+  }
+
   if (optind != argc-1) { 
     usage();
   } else {
@@ -764,8 +767,10 @@ public:
     // Downsample if necessary
 
     size = gray.size();
+    std::cout << "input image is " << size << "\n";
 
     if (scale_size(size, opts.max_size, SCALE_REDUCE_ONLY, size)) {
+      std::cout << "resizing to " << size << "\n";
       UMat tmp;
       cv::resize(gray, tmp, size, 0, 0, cv::INTER_AREA);
       tmp.copyTo(gray);
@@ -1247,8 +1252,16 @@ int main(int argc, char** argv) {
   DMat output, preview;
 
   if (fitter.opts.action == "greedyfit") {
+    if (fdata.params.size() >= fitter.opts.num_models) {
+      std::cerr << "skipping greedyfit because already have " << fdata.params.size() << " models!\n";
+      exit(1);
+    }
     fitter.greedy_fit(fdata, output, preview);
   } else if (fitter.opts.action == "replace") {
+    if (fdata.params.empty()) {
+      std::cerr << "skipping replace because no models (run greedy fit first?)\n";
+      exit(1);
+    }
     fitter.greedy_replace(fdata, output, preview);
   }
 
