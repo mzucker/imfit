@@ -182,8 +182,8 @@ inline double weighted_error(const DMat& target,
 // Beyond the box constraints above, we require the following
 // inequalities be met:
 //
-//   s >= 0.03125 * l <-> s - 0.03125 * l >= 0
-//   s <= 0.5 * l     <->     0.5 * l - s >= 0
+//   s >= 0.03125 * l <-> s - 0.03125 * l >= 0    width should be at least 1/32 wavelength;
+//   s <= 0.5 * l     <->     0.5 * l - s >= 0    width should be at most half a wavelength 
 //   t >= s           <->           t - s >= 0
 //   t <= 8 * s       <->       8 * s - t >= 0
 //
@@ -307,6 +307,55 @@ inline void gabor_random_params(double* params, double px_size,
 
 }
 
+double boltzmann_tabulate_probabilities(double lambda,
+                                      size_t n,
+                                      const double* W,
+                                      const double* r,
+                                      double* p) {
+
+  // see http://timvieira.github.io/blog/post/2014/02/11/exp-normalize-trick/
+  double a = 0;
+
+  // compute square weighted residual times lambda and find max
+  for (size_t i=0; i<n; ++i) {
+    double ri = r[i];
+    if (W) { ri *= W[i]; }
+    p[i] = ri * ri * lambda;
+    a = std::max(a, p[i]);
+  }
+
+  // exponentiate and sum
+  double total = 0.0;
+  for (size_t i=0; i<n; ++i) {
+    p[i] = exp(p[i] - a);
+    total += p[i];
+  }
+
+  // convert to probabilites
+  double running_sum = 0;
+  for (size_t i=0; i<n; ++i) {
+    running_sum += p[i];
+    p[i] = running_sum / total;
+  }
+
+  return exp(a) * total;
+  
+}
+
+size_t multinomial_sample(size_t n,
+                          const double* p,
+                          cv::RNG& rng) {
+
+  double r = rng.uniform(0.0, 1.0);
+  
+  // return first one which does not compare less
+  // return first one greater than or equal to
+  const double* i = std::lower_bound(p, p+n, r);
+
+  return i-p;
+  
+}
+
 //////////////////////////////////////////////////////////////////////
 // This is a bit of a gross function because it can not only gabor_evaluate
 // a single Gabor function, but it can also optionally compute the
@@ -338,6 +387,8 @@ inline double gabor(const double* const params, size_t n,
   const double& t = params[GABOR_PARAM_T];
   const double& s = params[GABOR_PARAM_S];
   const double& h = params[GABOR_PARAM_H];
+
+  
 
   //////////////////////////////////////////////////
   // Compute constants for gabor_evaluating Gabor function
@@ -551,14 +602,12 @@ struct Options {
   std::string output_file; // o
 
   int num_models;          // n
-  int greedy_num_fits;     // f
-  int greedy_init_iter;    // m
-  int greedy_refine_iter;  // r
-  int greedy_replace_iter; // R
+  int num_fits;            // f
+  int init_iter;           // m
+  int refine_iter;         // r
   int max_size;            // s
   int preview_size;        // p
-  int full_iter;           // F
-  double full_alpha;       // A
+  double lambda;           // l
   bool show_gui;           // g
 
   Options() {
@@ -575,16 +624,14 @@ struct Options {
 
     num_models = 64;
 
-    greedy_num_fits = 100;
-    greedy_init_iter = 10;
-    greedy_refine_iter = 100;
-    greedy_replace_iter = 100000; // user probably hits Ctrl+C before this happens
+    num_fits = 100;
+    init_iter = 10;
+    refine_iter = 100;
 
     max_size = 32;
     preview_size = 512;
 
-    full_iter = 100;
-    full_alpha = 4e-5;
+    lambda = 10.0;
 
     show_gui = true;
 
@@ -612,8 +659,6 @@ void usage(std::ostream& ostr=std::cerr, int code=1) {
     "  -g, --no-gui             Suppress graphical output\n"
     "  -i, --input=FILE         Read input params from FILE\n"
     "  -o, --output=FILE        Write output params to FILE\n"
-    "  -F, --full-iter=NUM      Maximum # of iterations for full refinement\n"
-    "  -A, --full-alpha=NUM     Step size for full refinement\n"
     "  -R, --replace-iter=NUM   Maximum # of iterations for replacement\n"
     "  -h, --help               See this message\n";
 
@@ -668,24 +713,22 @@ std::string getinputfile(const char* str) {
 void parse_cmdline(int argc, char** argv, Options& opts) {
 
   const struct option long_options[] = {
+    { "weights",             required_argument, 0, 'w' },
+    { "input",               required_argument, 0, 'i' },
+    { "output",              required_argument, 0, 'o' },
     { "num-models",          required_argument, 0, 'n' },
     { "num-fits",            required_argument, 0, 'f' },
     { "maxiter",             required_argument, 0, 'm' },
     { "refine",              required_argument, 0, 'r' },
     { "max-size",            required_argument, 0, 's' },
-    { "weights",             required_argument, 0, 'w' },
     { "preview-size",        required_argument, 0, 'p' },
-    { "input",               required_argument, 0, 'i' },
-    { "output",              required_argument, 0, 'o' },
-    { "full-iter",           required_argument, 0, 'f' },
-    { "replace-iter",        required_argument, 0, 'R' },
-    { "full-alpha",          required_argument, 0, 'A' },
+    { "lambda",              required_argument, 0, 'l' },
     { "no-gui",              no_argument,       0, 'g' },
     { "help",                no_argument,       0, 'h' },
     { 0,                     0,                 0,  0  },
   };
 
-  const char* short_options = "n:f:m:r:s:w:p:i:o:a:F:A:R:gh";
+  const char* short_options = "w:i:o:n:f:m:r:s:p:l:gh";
 
   int opt, option_index;
 
@@ -693,18 +736,16 @@ void parse_cmdline(int argc, char** argv, Options& opts) {
                              long_options, &option_index)) != -1 ) {
 
     switch (opt) {
-    case 'n': opts.num_models = getlong(optarg); break;
-    case 'f': opts.greedy_num_fits = getlong(optarg); break;
-    case 'm': opts.greedy_init_iter = getlong(optarg); break;
-    case 'r': opts.greedy_refine_iter = getlong(optarg); break;
-    case 's': opts.max_size = getlong(optarg); break;
     case 'w': opts.weight_file = getinputfile(optarg); break;
-    case 'p': opts.preview_size = getlong(optarg); break;
     case 'i': opts.input_file = optarg; break;
     case 'o': opts.output_file = optarg; break;
-    case 'F': opts.full_iter = getlong(optarg); break;
-    case 'A': opts.full_alpha = getdouble(optarg); break;
-    case 'R': opts.greedy_replace_iter = getlong(optarg); break;
+    case 'n': opts.num_models = getlong(optarg); break;
+    case 'f': opts.num_fits = getlong(optarg); break;
+    case 'm': opts.init_iter = getlong(optarg); break;
+    case 'r': opts.refine_iter = getlong(optarg); break;
+    case 's': opts.max_size = getlong(optarg); break;
+    case 'p': opts.preview_size = getlong(optarg); break;
+    case 'l': opts.lambda = getdouble(optarg); break;
     case 'g': opts.show_gui = false; break;
     case 'h': usage(std::cout, 0); break;
     default: usage(); break;
@@ -880,6 +921,9 @@ public:
     f.cost = DBL_MAX;
     f.params.swap(ptmp);
 
+    std::cout << "loaded " << f.params.size() << " models "
+              << "from " << opts.input_file << "\n";
+
     DMat output(size, 0.0);
     compute_initial_cost(f, output);
 
@@ -951,13 +995,20 @@ public:
     double info[LM_INFO_SZ];
     
     DMat work(LM_BLEIC_DER_WORKSZ(GABOR_NUM_PARAMS, n, 0, GABOR_NUM_INEQ), 1);
+    DMat p;
+    double pscl = 1.0;
+
+    if (opts.lambda) {
+      p = DMat(n, 1);
+      pscl = boltzmann_tabulate_probabilities(opts.lambda, n, W, residual[0], p[0]);
+    }
 
     //////////////////////////////////////////////////
     // Single fit step 1: try current params (if they exist), as well
     // as a number of random param vectors, pocket the best result.
     // Do a minor amount of refining work for each try.
 
-    for (int fit=0; fit<opts.greedy_num_fits; ++fit) {
+    for (int fit=0; fit<opts.num_fits; ++fit) {
       
       DMat fit_params(GABOR_NUM_PARAMS, 1);
 
@@ -966,15 +1017,24 @@ public:
       if (fit == 0 && !best_params.empty()) {
         best_params.copyTo(fit_params);
       } else {
-        gabor_random_params(fit_params[0], px_size, cv::theRNG());
+        cv::RNG& rng = cv::theRNG();
+        gabor_random_params(fit_params[0], px_size, rng);
+        if (opts.lambda > 0) {
+          size_t i = multinomial_sample(n, p[0], rng);
+          double ri = residual[0][i] * (W ? W[i] : 1);
+          //std::cout << "chose i=" << i << " with weighted squared residual " << (ri*ri) << " and probability " << exp(ri * ri * opts.lambda - log(pscl)) << "\n";
+          double hp = 0.5 * px_size;
+          fit_params(GABOR_PARAM_U) = xc[0][i] + rng.uniform(-hp, hp);
+          fit_params(GABOR_PARAM_V) = yc[0][i] + rng.uniform(-hp, hp);
+        }
       }
 
       double final_cost;
 
       // Do a minor amount of refinement if allowed, otherwise, just
       // get cost.
-      if (opts.greedy_init_iter > 0) {
-        final_cost = cw.gabor_fit(fit_params[0], opts.greedy_init_iter, 
+      if (opts.init_iter > 0) {
+        final_cost = cw.gabor_fit(fit_params[0], opts.init_iter, 
                                   info, work[0], px_size);
       } else {
         final_cost = cw.gabor_eval(fit_params[0]);
@@ -995,8 +1055,8 @@ public:
 
     // Do a significant amount of refinement on the best param vector
     // found.
-    if (opts.greedy_refine_iter > 0) {
-      best_cost = cw.gabor_fit(best_params[0], opts.greedy_refine_iter, 
+    if (opts.refine_iter > 0) {
+      best_cost = cw.gabor_fit(best_params[0], opts.refine_iter, 
                                info, work[0], px_size);
     }
 
@@ -1072,7 +1132,8 @@ public:
       // Fit parameters
       DMat new_params;
       f.cost = fit_single(residual, new_params);
-      std::cout << "error after adding model " << (model+1) << " is " << f.cost << "\n";
+      std::cout << "error after adding model " << (model+1) << " "
+                << "is " << f.cost << "\n";
 
       // Get model output
       DMat new_output(size);
@@ -1105,15 +1166,13 @@ public:
 
 
   //////////////////////////////////////////////////////////////////////
-  // For a LARGE number of iterations, choose a random model to
-  // replace, and see if you can improve it. This is greedy
-  // hill-climbing, one model at a time.
+  // Forever loop: choose a random model to replace, and see if you
+  // can improve it. This is greedy hill-climbing, one model at a
+  // time.
 
   void replace_models(FitData& f, DMat& output, DMat& preview) const {
 
-    // Large number of iterations
-
-    for (int iter=0; iter<opts.greedy_replace_iter; ++iter) {
+    while (1) {
 
       DMat error;
 
@@ -1149,8 +1208,8 @@ public:
 
       double best_cost = fit_single(residual, best_params);
 
-      std::cout << "best error replacing " << replace << " "
-                << "at iter " << (iter+1) << " is " << best_cost << "\n";
+      std::cout << "best error replacing model " << (replace+1) << " "
+                << "is " << best_cost << "\n";
 
       // If improved, update params & display
       if (best_cost < f.cost) {
@@ -1188,7 +1247,7 @@ public:
 
     } // for each iter
 
-  } // greedy_replace
+  } // replace
 
   //////////////////////////////////////////////////////////////////////
   // Display graphical output/preview
@@ -1260,11 +1319,7 @@ int main(int argc, char** argv) {
 
   fitter.replace_models(fdata, output, preview);
 
-  if (opts.show_gui) {
-    fitter.display(output, preview);
-    cv::waitKey(0);
-  }
-
+  // unreachable: replace is an infinite loop
   return 0;
 
 }
