@@ -1102,7 +1102,6 @@ public:
     ConstantWrapper preview_cw(preview_n, preview_xc[0], preview_yc[0],
                                NULL, NULL);
     
-
     // Compose all outputs and preview
     for (size_t i=0; i<f.outputs.size(); ++i) {
 
@@ -1116,6 +1115,11 @@ public:
 
     }
 
+    if (opts.show_gui) {
+      DMat cur_output = DMat::zeros(output.size());
+      display(output, preview, cur_output);
+    }
+    
     // Get initial error
     DMat error;
     f.cost = weighted_error(target, output, wmat, error, ERR_DISPLAY_POW);
