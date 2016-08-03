@@ -1,6 +1,6 @@
 imfit
 ======
-Image fitting with Gabor functions
+Image fitting with Gabor functions - see full writeup at <https://mzucker.github.io/2016/08/01/gabor-2.html>
 
 Building
 ========
