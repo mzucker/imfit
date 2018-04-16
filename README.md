@@ -29,4 +29,3 @@ See also
 ========
 
   - <https://www.shadertoy.com/view/4ljSRR>
-  - <https://www.shadertoy.com/view/XltGzS>
